@@ -177,7 +177,7 @@ export async function getVercelAIChatResponseStream(
       temperature,
       maxTokens,
       customApiIncludeMimeType,
-      messages: filteredMessages, // フィルタリングされたメッセージを使用
+      messages: filteredMessages,
     })
   } else {
     // Vercel AI SDK用データ
@@ -193,15 +193,15 @@ export async function getVercelAIChatResponseStream(
     })
   }
 
-  const response = await fetch(apiEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestData),
-  })
-
   try {
+    const response = await fetch(apiEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestData),
+    })
+
     if (!response.ok) {
       const responseBody = await response.json()
       throw new Error(
@@ -212,14 +212,16 @@ export async function getVercelAIChatResponseStream(
 
     return new ReadableStream({
       async start(controller) {
-        if (!response.body) {
-          throw new Error(
-            `API response from ${selectAIService} is empty, status ${response.status}`,
-            { cause: { errorCode: 'AIAPIError' } }
+        const reader = response.body?.getReader()
+
+        if (!reader) {
+          const error = new Error(
+            `API response from ${selectAIService} is empty, status ${response.status}`
           )
+          controller.error(error)
+          return
         }
 
-        const reader = response.body.getReader()
         const decoder = new TextDecoder('utf-8')
         let buffer = ''
 
@@ -238,9 +240,8 @@ export async function getVercelAIChatResponseStream(
                 const decodedContent = JSON.parse(content)
                 controller.enqueue(decodedContent)
               } else if (line.startsWith('data:')) {
-                // OpenAI API形式のストリームデータに対応
-                const content = line.substring(5).trim() // 'data:' プレフィックスを除去
-                if (content === '[DONE]') continue // 終了マーカーは無視
+                const content = line.substring(5).trim()
+                if (content === '[DONE]') continue
 
                 try {
                   const data = JSON.parse(content)
@@ -264,8 +265,9 @@ export async function getVercelAIChatResponseStream(
                   type: 'error',
                   tag: 'vercel-api-error',
                 })
+                controller.error(new Error(decodedContent))
+                return
               } else if (line.startsWith('9:')) {
-                // Anthropicのツール呼び出し情報を処理
                 const content = line.substring(2).trim()
                 try {
                   const decodedContent = JSON.parse(content)
@@ -287,13 +289,10 @@ export async function getVercelAIChatResponseStream(
               } else if (line.startsWith('e:') || line.startsWith('d:')) {
                 continue
               } else if (line.match(/^([a-z]|\d):/)) {
-                // これらは通常、ストリームの終了やメタデータを示すものであり、コンテンツではない
                 continue
               } else if (line.trim() !== '') {
-                // Ollamaなど、JSONLフォーマットのストリーミングデータに対応
                 try {
                   const data = JSON.parse(line)
-                  // Ollama形式: {"message":{"role":"assistant","content":"テキスト"}}
                   if (data.message?.content) {
                     controller.enqueue(data.message.content)
                   }
@@ -308,16 +307,10 @@ export async function getVercelAIChatResponseStream(
             `Error fetching ${selectAIService} API response:`,
             error
           )
-
-          const errorMessage = handleApiError('AIAPIError')
-          toastStore.getState().addToast({
-            message: errorMessage,
-            type: 'error',
-            tag: 'vercel-api-error',
-          })
+          controller.error(error)
         } finally {
-          controller.close()
           reader.releaseLock()
+          controller.close()
         }
       },
     })
